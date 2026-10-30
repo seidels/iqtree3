@@ -101,7 +101,7 @@ public:
     virtual void readRates(string str) noexcept(false) override;
     using ModelMarkov::readRates;
 
-    // base versions read the (freed) rates[] array
+    // base versions read the rates[] array, which is not allocated
     virtual bool isUnstableParameters() override;
     virtual void adaptStateFrequency(double *state_freq) override;
 

@@ -54,8 +54,11 @@ public:
 		@param tree associated tree for the model
         @param reversible TRUE (default) for reversible model, FALSE for non-reversible
         @param adapt_tree TRUE (default) to convert rooted<->unrooted tree
+        @param dense_rate_matrix FALSE for a closed-form non-reversible model (SciPhy):
+               no num_states x num_states rate matrix, rates or eigen buffers
 	*/
-    ModelMarkov(PhyloTree *tree, bool reversible = true, bool adapt_tree = true);
+    ModelMarkov(PhyloTree *tree, bool reversible = true, bool adapt_tree = true,
+                bool dense_rate_matrix = true);
 
 	/**
 		@return TRUE if model is time-reversible, FALSE otherwise
@@ -497,6 +500,9 @@ protected:
 		the number of free rate parameters
 	*/
 	int num_params;
+
+	/** FALSE: no dense rate matrix is allocated (see constructor) */
+	bool dense_rate_matrix;
 
 	/**
 		eigenvalues of the rate matrix Q

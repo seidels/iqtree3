@@ -512,6 +512,11 @@ public:
     void checkSeqName();
 
     /**
+            @return FALSE to skip the per-state composition test in checkSeqName
+     */
+    virtual bool hasSeqComposition() const { return true; }
+
+    /**
      * check identical sequences
      * @return the number of sequences that are identical to one of the sequences
      */

@@ -81,6 +81,9 @@ public:
     // allocating the parsimony buffers (O(N*S) memory).
     virtual int wrapperFixNegativeBranch(bool force_change) override;
 
+    // No ML distances for barcode data, so no AlignmentPairwise (eight S x S buffers each).
+    virtual void prepareToComputeDistances() override;
+
 protected:
     bool hasBarcodeAlignment() const;
 

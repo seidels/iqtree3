@@ -163,6 +163,12 @@ public:
      */
     int getNumTapeStates() const { return (int)tape_states.size(); }
 
+    // States are whole tape vectors, so num_states = S can be ~1e5. The composition
+    // test and the absent-state check build S x S state frequencies (convertCountToFreq)
+    // that the SciPhy likelihood never uses: skip both.
+    virtual bool hasSeqComposition() const override { return false; }
+    virtual void checkAbsentStates(string msg) override {}
+
 protected:
     int num_sites;              ///< Total number of editing sites (all tapes)
     int max_insertion_type;     ///< Maximum insertion type value (M)

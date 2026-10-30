@@ -40,8 +40,10 @@ int computeStateFreqFromQMatrix (double Q[], double pi[], int n);
 //const double MIN_FREQ_RATIO = MIN_FREQUENCY;
 //const double MAX_FREQ_RATIO = 1.0/MIN_FREQUENCY;
 
-ModelMarkov::ModelMarkov(PhyloTree *tree, bool reversible, bool adapt_tree)
- : ModelSubst(tree->aln->num_states), EigenDecomposition()
+ModelMarkov::ModelMarkov(PhyloTree *tree, bool reversible, bool adapt_tree,
+                         bool dense_rate_matrix)
+ : ModelSubst(tree->aln->num_states), EigenDecomposition(),
+   dense_rate_matrix(dense_rate_matrix)
 {
     phylo_tree = tree;
     rates = nullptr;
@@ -99,6 +101,15 @@ void ModelMarkov::setReversible(bool reversible, bool adapt_tree) {
                 cout << "Converting rooted to unrooted tree..." << endl;
             }
             phylo_tree->convertToUnrooted();
+        }
+    } else if (!dense_rate_matrix) {
+        // closed-form non-reversible model: no S x S buffers, no free rates
+        ignore_state_freq = true;
+        num_params = 0;
+        if (adapt_tree && phylo_tree && !phylo_tree->rooted && phylo_tree->root) {
+            if (verbose_mode >= VB_MED)
+                cout << "Converting unrooted to rooted tree..." << endl;
+            phylo_tree->convertToRooted();
         }
     } else {
         // setup non-reversible model

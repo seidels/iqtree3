@@ -698,6 +698,12 @@ int PhyloTreeSciPhy::wrapperFixNegativeBranch(bool force_change) {
     return fixed;
 }
 
+void PhyloTreeSciPhy::prepareToComputeDistances() {
+    if (!hasBarcodeAlignment()) {
+        IQTree::prepareToComputeDistances();
+    }
+}
+
 void PhyloTreeSciPhy::removeIdenticalSeqs(Params &params) {
     if (!hasBarcodeAlignment()) {
         IQTree::removeIdenticalSeqs(params);

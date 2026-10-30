@@ -3643,6 +3643,8 @@ double PhyloTree::computeDist_Experimental(double *dist_mat, double *var_mat) {
 
 double PhyloTree::computeDist(double *dist_mat, double *var_mat) {
     prepareToComputeDistances();
+    if (distanceProcessors.empty())
+        outError("ML distances are not supported for this model");
     size_t nseqs = aln->getNSeq();
     double longest_dist = 0.0;
     cout.precision(6);

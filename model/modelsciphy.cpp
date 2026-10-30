@@ -17,25 +17,19 @@
 ModelSciPhy::ModelSciPhy(PhyloTree *tree,
                          const std::vector<double> &known_edit_probs,
                          double known_origin_time)
-: ModelMarkov(tree, false, true), // reversible = false, adapt_tree = true
+// reversible = false, adapt_tree = true (calls convertToRooted()), and no dense
+// rate matrix: S = #tape vectors, so S x S buffers would be GBs on real data.
+: ModelMarkov(tree, false, true, false),
   clock_rate(1.0),
   clock_rate_fixed(false),
   edit_probs(known_edit_probs),
   origin_time(known_origin_time)
 {
-    // using ModelMarkov: reversible = false, adapt_tree = true, calls convertToRooted() via adapt_tree
-
     name      = "SciPhy";
     full_name = "SciPhy";
 
     // just for printing info about the model, not used for likelihood calculations
     freq_type = FREQ_EQUAL;
-
-    // Free ModelMarkov's S x S rate_matrix / rates (S = #tape vectors; unused, GBs on
-    // real data). aligned_free nulls the pointer, so no double free.
-    aligned_free(rate_matrix);
-    delete[] rates;
-    rates = nullptr;
 
     // uniform equilibrium frequencies (O(S); only printed, never used in the likelihood)
     for (int i = 0; i < num_states; ++i) {

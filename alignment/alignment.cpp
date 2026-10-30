@@ -185,7 +185,7 @@ void Alignment::checkSeqName() {
     }
     if (!ok) outError("Please rename sequences listed above!");
 
-    if (!Params::getInstance().compute_seq_composition) {
+    if (!Params::getInstance().compute_seq_composition || !hasSeqComposition()) {
         return;
     }
     
