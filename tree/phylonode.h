@@ -38,6 +38,26 @@ struct SciPhyAncestorPartials {
 };
 
 /**
+ * Per-directed-edge SciPhy partials in prefix-depth form, flat over all tapes.
+ *
+ * Every possible state of tape p is a prefix of tip tape state head[p].rep, of depth
+ * 0..head[p].depth; lh[offset_p + k] is the conditional likelihood of the depth-k
+ * prefix (offsets: PhyloTreeSciPhy::tape_lh_offset). True value: lh * exp(log_scale).
+ */
+struct SciPhyTapeHead {
+    double log_scale = 0.0;
+    int rep = -1;
+    short depth = -1;
+    // dropout: tape present but unobserved; no states, constant carried in log_scale
+    bool wildcard = false;
+};
+
+struct SciPhyTapePartials {
+    std::vector<SciPhyTapeHead> head;   // one per pattern
+    std::vector<double> lh;
+};
+
+/**
 A neighbor in a phylogenetic tree
 
     @author BUI Quang Minh, Steffen Klaere, Arndt von Haeseler <minh.bui@univie.ac.at>
@@ -70,6 +90,7 @@ public:
         direction = UNDEFINED_DIRECTION;
         size = 0;
         sciphy_partial = NULL;
+        sciphy_tape_partial = NULL;
     }
 
     /**
@@ -87,6 +108,7 @@ public:
         direction = UNDEFINED_DIRECTION;
         size = 0;
         sciphy_partial = NULL;
+        sciphy_tape_partial = NULL;
     }
 
     /**
@@ -102,6 +124,7 @@ public:
         direction = nei->direction;
         size = nei->size;
         sciphy_partial = NULL;
+        sciphy_tape_partial = NULL;
     }
 
     /**
@@ -110,6 +133,7 @@ public:
      */
     virtual ~PhyloNeighbor() {
         delete sciphy_partial;
+        delete sciphy_tape_partial;
     }
 
 
@@ -192,6 +216,11 @@ private:
         pattern for the subtree on the far side of this directed edge.
      */
     std::vector<SciPhyAncestorPartials> *sciphy_partial;
+
+    /**
+        same cache for the prefix-depth kernel (PhyloTreeSciPhy, default kernel)
+     */
+    SciPhyTapePartials *sciphy_tape_partial;
 
     /**
         likelihood scaling factor
