@@ -100,6 +100,23 @@ double logPoissonPMF(int k, double mean) {
     return (double)k * std::log(mean) - mean - std::lgamma((double)k + 1.0);
 }
 
+// P(K >= r) for K ~ Poisson(mean). direct = false is 1 - sum of the lower terms, which
+// cancels below ~1e-16 (e.g. 2e-17 instead of 2e-45 on short branches); direct = true sums
+// the upper terms, past the mode by TAIL_EXTRA_TERMS.
+double poissonUpperTail(int r, double mean, bool direct) {
+    const int TAIL_EXTRA_TERMS = 60;
+    if (!direct) {
+        double tail = 1.0;
+        for (int i = 0; i < r; ++i) tail -= poissonPMF(i, mean);
+        return tail;
+    }
+    double tail = (r == 0) ? 1.0 : 0.0;
+    if (r > 0)
+        for (int i = r; i < r + TAIL_EXTRA_TERMS || i < 2.0 * mean + TAIL_EXTRA_TERMS; ++i)
+            tail += poissonPMF(i, mean);
+    return tail;
+}
+
 // Probability of an insert of type scar (1..M); 0 if out of range. Types beyond
 // edit_probs are uniform.
 double insertProb(const std::vector<double> &edit_probs, int M, int scar) {
@@ -166,19 +183,9 @@ double PhyloTreeSciPhy::logTransProbVec(const std::vector<int> &parent,
     const double distance = std::max(0.0, lambda * branch_length);
 
     if (k == nr_possible) {
-        // Absorbing tail P(K >= nr_possible) under Poisson(distance).
-        // TODO: 1 - sum cancels when the tail is below ~1e-16 (short branches), e.g.
-        // 2e-17 instead of 2e-45; use a direct sum or the incomplete gamma P(r, mu).
-        // The check oracle already uses the direct sum (oracleDirectTail).
-        double tail = 1.0;
-        if (oracleDirectTail()) {
-            tail = (nr_possible == 0) ? 1.0 : 0.0;
-            if (nr_possible > 0)
-                for (int i = nr_possible; i < nr_possible + 60 || i < 2.0 * distance + 60; ++i)
-                    tail += poissonPMF(i, distance);
-        } else {
-            for (int i = 0; i < nr_possible; ++i) tail -= poissonPMF(i, distance);
-        }
+        // Absorbing tail P(K >= nr_possible) under Poisson(distance). The check oracle
+        // sums it directly; the old kernel itself cancels (see poissonUpperTail).
+        const double tail = poissonUpperTail(nr_possible, distance, oracleDirectTail());
         if (tail > 0.0) return std::log(tail) + log_insert;
         // tail underflowed: use its leading term P(K = nr_possible)
         return logPoissonPMF(nr_possible, distance) + log_insert;
