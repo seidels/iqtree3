@@ -15,6 +15,7 @@
 #include <vector>
 
 class BarcodeAlignment;
+class ModelSciPhy;
 
 // SciPhyAncestorPartials and SciPhyTapePartials are defined in phylonode.h (cached per half-edge).
 
@@ -28,11 +29,21 @@ class BarcodeAlignment;
  *          evaluation and per-tape differences are reported (correctness oracle).
  *          The oracle sums its absorbing tail directly (see logTransProbVec TODO)
  *   check-raw  same, against the unmodified old kernel
+ * Other debug variables: IQTREE_SCIPHY_PRINTLL=1 prints every logL;
+ * IQTREE_SCIPHY_CHECK=1 compares each NNI candidate score with the exact logL.
+ * All three are read once, in the constructor.
  */
 class PhyloTreeSciPhy : public IQTree {
 public:
     // longest supported tape (sites); sizes the per-branch Poisson table
     static const int MAX_TAPE_SITES = 32;
+
+    // Poisson pmf and upper tails of one branch, shared by all tapes (see phylotreesciphy.cpp)
+    struct BranchTable {
+        double pois[MAX_TAPE_SITES + 1];
+        double tail[MAX_TAPE_SITES + 1];   // tail[r] = P(K >= r), summed directly
+        bool log_space;                    // entries are logs
+    };
 
     enum SciPhyKernel { SCIPHY_KERNEL_TAPE, SCIPHY_KERNEL_OLD, SCIPHY_KERNEL_CHECK,
                         SCIPHY_KERNEL_CHECK_RAW };
@@ -40,6 +51,9 @@ public:
     PhyloTreeSciPhy();
     explicit PhyloTreeSciPhy(Alignment *aln);
     virtual ~PhyloTreeSciPhy();
+
+    // check mode: print per-call-site statistics, then clear them
+    void reportKernelCheck();
 
     virtual double computeLikelihood(double *pattern_lh = nullptr, bool save_log_value = true) override;
 
@@ -173,11 +187,14 @@ protected:
 
     // <----- kernel selection and check mode ----->
 
-    SciPhyKernel sciphy_kernel;
+    void readEnv();
+    SciPhyKernel sciphy_kernel = SCIPHY_KERNEL_TAPE;
+    bool print_ll = false;
+    bool nni_cache_check = false;
     bool useOldKernel() const { return sciphy_kernel == SCIPHY_KERNEL_OLD; }
     bool checking() const { return sciphy_kernel >= SCIPHY_KERNEL_CHECK; }
     // old kernel's tail as a direct sum (check mode only)
-    bool oracle_direct_tail;
+    bool oracleDirectTail() const { return sciphy_kernel == SCIPHY_KERNEL_CHECK; }
     bool hasPartial(PhyloNeighbor *nei) const;
 
     // check mode: compare per-tape logL (new vs old), keep counts per call site
@@ -200,7 +217,12 @@ protected:
     std::vector<double> prefix_prod;
     std::vector<unsigned char> prefix_zeros;
 
+    // Builds the tables above once; the alignment and model are fixed afterwards.
     void initTapeKernel();
+    // tape length (sites) of pattern p, from its first observed cell
+    int patternTapeLength(size_t p) const;
+    const ModelSciPhy &sciphyModel() const;
+    const BarcodeAlignment &barcodeAlignment() const;
     int stateDepth(int s) const { return (int)(prefix_offset[s + 1] - prefix_offset[s]) - 1; }
     const double *prefixProd(int s) const { return &prefix_prod[prefix_offset[s]]; }
     const unsigned char *prefixZeros(int s) const { return &prefix_zeros[prefix_offset[s]]; }
@@ -208,6 +230,8 @@ protected:
     // depth of the longest common prefix of tape states a and b, at most bound
     int commonDepth(int a, int b, int bound) const;
 
+    // table for a branch of the given length (mean edits = clock * length)
+    void fillBranchTable(double len, BranchTable &bt) const;
     void sizeTapePartials(SciPhyTapePartials &tp) const;
     SciPhyTapePartials &tapePartials(PhyloNeighbor *nei) const;
 

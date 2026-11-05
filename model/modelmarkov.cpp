@@ -41,9 +41,9 @@ int computeStateFreqFromQMatrix (double Q[], double pi[], int n);
 //const double MAX_FREQ_RATIO = 1.0/MIN_FREQUENCY;
 
 ModelMarkov::ModelMarkov(PhyloTree *tree, bool reversible, bool adapt_tree,
-                         bool dense_rate_matrix)
+                         bool allocate_dense)
  : ModelSubst(tree->aln->num_states), EigenDecomposition(),
-   dense_rate_matrix(dense_rate_matrix)
+   dense_rate_matrix(allocate_dense)
 {
     phylo_tree = tree;
     rates = nullptr;
@@ -78,6 +78,14 @@ void ModelMarkov::setReversible(bool reversible, bool adapt_tree) {
     bool old_reversible = is_reversible;
     is_reversible = reversible;
 
+    auto convertToRootedIfAdapting = [&]() {
+        if (adapt_tree && phylo_tree && !phylo_tree->rooted && phylo_tree->root) {
+            if (verbose_mode >= VB_MED)
+                cout << "Converting unrooted to rooted tree..." << endl;
+            phylo_tree->convertToRooted();
+        }
+    };
+
     if (reversible) {
         // setup reversible model
         int i;
@@ -106,11 +114,7 @@ void ModelMarkov::setReversible(bool reversible, bool adapt_tree) {
         // closed-form non-reversible model: no S x S buffers, no free rates
         ignore_state_freq = true;
         num_params = 0;
-        if (adapt_tree && phylo_tree && !phylo_tree->rooted && phylo_tree->root) {
-            if (verbose_mode >= VB_MED)
-                cout << "Converting unrooted to rooted tree..." << endl;
-            phylo_tree->convertToRooted();
-        }
+        convertToRootedIfAdapting();
     } else {
         // setup non-reversible model
         ignore_state_freq = true;
@@ -153,11 +157,7 @@ void ModelMarkov::setReversible(bool reversible, bool adapt_tree) {
         ensure_aligned_allocated(cevec, num_states_squared);
         ensure_aligned_allocated(cinv_evec, num_states_squared);
         
-        if (adapt_tree && phylo_tree && !phylo_tree->rooted && phylo_tree->root) {
-            if (verbose_mode >= VB_MED)
-                cout << "Converting unrooted to rooted tree..." << endl;
-            phylo_tree->convertToRooted();
-        }
+        convertToRootedIfAdapting();
         num_params = num_rates - 1;
     }
 }
