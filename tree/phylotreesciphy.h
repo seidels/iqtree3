@@ -173,6 +173,15 @@ protected:
 
     void ensureSciPhySnapshot();
 
+    // logL over the origin branch with the active kernel (compares kernels in check mode)
+    double originLikelihood(PhyloNeighbor *origin_edge, double t);
+
+    bool buildNNILocalPartials(PhyloNode *node1, PhyloNode *node2,
+                               std::vector<SciPhyAncestorPartials> &downChild,
+                               std::vector<SciPhyAncestorPartials> &upParent);
+    double scoreNNICandidate(PhyloNode *node1, PhyloNode *node2, int cnt,
+                             double orig_len, double &optlen);
+
     // NNI scoring: rebuild Down(child) / UpToC(parent) for the current (swapped)
     // neighbors from cached partials, without touching the cache.
     void buildDownwardLocal(PhyloNode *child, PhyloNode *parent,
@@ -234,6 +243,14 @@ protected:
     void fillBranchTable(double len, BranchTable &bt) const;
     void sizeTapePartials(SciPhyTapePartials &tp) const;
     SciPhyTapePartials &tapePartials(PhyloNeighbor *nei) const;
+
+    // lh[i] *= sum_j T(i,j) child[j] for one child branch; underflow flags tape p in tape_redo
+    void multiplyChild(const BranchTable &bt, int p, const SciPhyTapeHead &c,
+                       const double *child_lh, SciPhyTapeHead &h, double *lh);
+    // support (rep, depth) of the observed kids' common prefix; headOf(kid) gives its head
+    template <class HeadOf>
+    void commonSupport(const std::vector<PhyloNeighbor*> &kids, HeadOf headOf,
+                       int &rep, int &depth) const;
 
     void computeTapeDownward(PhyloNeighbor *dad_branch, PhyloNode *dad);
     // Down partial of a node from its children's cached Down partials.

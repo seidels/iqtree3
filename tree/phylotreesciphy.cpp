@@ -910,6 +910,21 @@ void PhyloTreeSciPhy::optimizeOneBranch(PhyloNode *node1, PhyloNode *node2,
 }
 
 
+// logL over the origin branch (length t) with the active kernel; check mode also
+// compares against the old kernel.
+double PhyloTreeSciPhy::originLikelihood(PhyloNeighbor *origin_edge, double t) {
+    if (useOldKernel())
+        return originClosure(*origin_edge->sciphy_partial, t, nullptr);
+    if (!checking())
+        return originClosureTape(*origin_edge->sciphy_tape_partial, t, nullptr);
+    const size_t nptn = aln->getNPattern();
+    std::vector<double> new_ptn(nptn), old_ptn(nptn);
+    const double lh = originClosureTape(*origin_edge->sciphy_tape_partial, t, new_ptn.data());
+    originClosure(*origin_edge->sciphy_partial, t, old_ptn.data());
+    checkTapes("origin", new_ptn.data(), old_ptn.data());
+    return lh;
+}
+
 // Brent objective; the active mode picks which branch `value` sets.
 double PhyloTreeSciPhy::computeFunction(double value) {
     if (sciphy_origin_active) {
@@ -917,17 +932,7 @@ double PhyloTreeSciPhy::computeFunction(double value) {
         origin_edge->length = value;
         PhyloNeighbor *ob = (PhyloNeighbor*) origin_edge->node->findNeighbor(root);
         if (ob) ob->length = value;
-        if (useOldKernel())
-            return -originClosure(*origin_edge->sciphy_partial, value, nullptr);
-        if (checking()) {
-            const size_t nptn = aln->getNPattern();
-            std::vector<double> new_ptn(nptn), old_ptn(nptn);
-            const double lh = originClosureTape(*origin_edge->sciphy_tape_partial, value, new_ptn.data());
-            originClosure(*origin_edge->sciphy_partial, value, old_ptn.data());
-            checkTapes("origin", new_ptn.data(), old_ptn.data());
-            return -lh;
-        }
-        return -originClosureTape(*origin_edge->sciphy_tape_partial, value, nullptr);
+        return -originLikelihood(origin_edge, value);
     }
     if (sciphy_nni_active) {
         // central branch of a candidate NNI, against local partials
@@ -1338,6 +1343,93 @@ void PhyloTreeSciPhy::changeNNIBrans(NNIMove &nnimove) {
     n21->setLength(nnimove.newLen[0]);
 }
 
+// Down(node2) and UpToC(node1) of the current (swapped) topology, for the active kernel.
+// False if a cached partial is missing, or a wildcard tape makes the local combine inexact.
+bool PhyloTreeSciPhy::buildNNILocalPartials(PhyloNode *node1, PhyloNode *node2,
+                                            std::vector<SciPhyAncestorPartials> &downChild,
+                                            std::vector<SciPhyAncestorPartials> &upParent) {
+    const size_t nptn = aln->getNPattern();
+    if (useOldKernel()) {
+        buildDownwardLocal(node2, node1, downChild);
+        buildUpToCLocal(node1, node2, downChild, upParent);
+        if (downChild.size() != nptn || upParent.size() != nptn) return false;
+        // TODO: local combine is not exact with wildcard partials; use the exact recompute
+        for (size_t p = 0; p < nptn; ++p)
+            if (downChild[p].wildcard || upParent[p].wildcard) return false;
+        return true;
+    }
+    buildTapeDownwardLocal(node2, node1, tape_nni_down);
+    buildTapeUpToCLocal(node1, node2, tape_nni_down, tape_nni_up);
+    if (tape_nni_down.head.size() != nptn || tape_nni_up.head.size() != nptn) return false;
+    // same wildcard fallback as the old kernel
+    for (size_t p = 0; p < nptn; ++p)
+        if (tape_nni_down.head[p].wildcard || tape_nni_up.head[p].wildcard) return false;
+    return true;
+}
+
+// logL of the swapped topology around node1-node2, with the central branch length
+// optimized (optlen). Falls back to the exact logL when local partials can't be used.
+// IQTREE_SCIPHY_CHECK=1 also computes the exact logL and reports differences.
+double PhyloTreeSciPhy::scoreNNICandidate(PhyloNode *node1, PhyloNode *node2, int cnt,
+                                          double orig_len, double &optlen) {
+    PhyloNeighbor *central      = (PhyloNeighbor*) node1->findNeighbor(node2);
+    PhyloNeighbor *central_back = (PhyloNeighbor*) node2->findNeighbor(node1);
+    std::vector<SciPhyAncestorPartials> downChild, upParent;
+    const bool cached = buildNNILocalPartials(node1, node2, downChild, upParent);
+
+    double score;
+    optlen = orig_len;
+    if (cached) {
+        if (useOldKernel()) {
+            sciphy_nni_up = &upParent;
+            sciphy_nni_down = &downChild;
+        } else {
+            sciphy_nni_up_tape = &tape_nni_up;
+            sciphy_nni_down_tape = &tape_nni_down;
+        }
+        sciphy_nni_active = true;
+        double neg = 0.0, ferr = 0.0;
+        const double initial_neg = computeFunction(orig_len);
+        const double optx = minimizeOneDimen(params->min_branch_length, orig_len,
+                                             params->max_branch_length, params->min_branch_length,
+                                             &neg, &ferr);
+        sciphy_nni_active = false;
+        sciphy_nni_up = sciphy_nni_down = nullptr;
+        sciphy_nni_up_tape = sciphy_nni_down_tape = nullptr;
+        const bool keep_orig = (neg > initial_neg + 1e-8);
+        optlen = keep_orig ? orig_len : optx;
+        score  = -(keep_orig ? initial_neg : neg);
+
+        if (checking()) {
+            // old local partials at the same candidate, combined at both lengths
+            const size_t nptn = aln->getNPattern();
+            buildDownwardLocal(node2, node1, downChild);
+            buildUpToCLocal(node1, node2, downChild, upParent);
+            std::vector<double> new_ptn(nptn), old_ptn(nptn);
+            for (double len : {orig_len, optlen}) {
+                combineTape(tape_nni_up, tape_nni_down, len, new_ptn.data());
+                combineVectors(upParent, downChild, len, old_ptn.data());
+                checkTapes("nni", new_ptn.data(), old_ptn.data());
+            }
+        }
+    } else {
+        central->length = central_back->length = orig_len;
+        score = computeLikelihood();
+    }
+
+    if (nni_cache_check) {
+        central->length = central_back->length = optlen;
+        const double exact = computeLikelihood();
+        if (std::fabs(exact - score) > 1e-6)
+            std::cerr << std::setprecision(12)
+                      << "[nni cache check] n1=" << node1->id << " n2=" << node2->id
+                      << " cnt=" << cnt << " cached=" << score << " exact=" << exact
+                      << " diff=" << (exact - score) << (cached ? "" : " (fallback)") << "\n";
+        score = exact;
+    }
+    return score;
+}
+
 NNIMove PhyloTreeSciPhy::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2,
                                            NNIMove *nniMoves) {
     if (!hasBarcodeAlignment()) {
@@ -1390,7 +1482,6 @@ NNIMove PhyloTreeSciPhy::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2,
     PhyloNeighbor *central      = (PhyloNeighbor*) node1->findNeighbor(node2);
     PhyloNeighbor *central_back = (PhyloNeighbor*) node2->findNeighbor(node1);
     const double orig_central_len = central->length;
-    const size_t nptn = aln->getNPattern();
 
     auto rawSwap = [&](int cnt) {
         NeighborVec::iterator n1it = nniMoves[cnt].node1Nei_it;
@@ -1413,79 +1504,13 @@ NNIMove PhyloTreeSciPhy::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2,
 
     // For each swap, rebuild only the two partials next to the central branch and
     // optimize its length: O(local) per candidate instead of O(N).
-    // IQTREE_SCIPHY_CHECK=1 also computes the exact logL and reports differences.
-    const bool dbg_cache = nni_cache_check;
     for (int cnt = 0; cnt < 2; cnt++) if (constraintTree.isCompatible(nniMoves[cnt])) {
         // check mode overwrites the snapshot, so rebuild it first
-        if (dbg_cache) { sciphy_snapshot_valid = false; ensureSciPhySnapshot(); }
+        if (nni_cache_check) { sciphy_snapshot_valid = false; ensureSciPhySnapshot(); }
 
         rawSwap(cnt);
-        std::vector<SciPhyAncestorPartials> downChild, upParent;
-        bool cached;
-        if (useOldKernel()) {
-            buildDownwardLocal(node2, node1, downChild);
-            buildUpToCLocal(node1, node2, downChild, upParent);
-            cached = (downChild.size() == nptn && upParent.size() == nptn);
-            // TODO: local combine is not exact with wildcard partials; use the exact recompute
-            if (cached)
-                for (size_t p = 0; p < nptn; ++p)
-                    if (downChild[p].wildcard || upParent[p].wildcard) { cached = false; break; }
-        } else {
-            buildTapeDownwardLocal(node2, node1, tape_nni_down);
-            buildTapeUpToCLocal(node1, node2, tape_nni_down, tape_nni_up);
-            cached = (tape_nni_down.head.size() == nptn && tape_nni_up.head.size() == nptn);
-            // same wildcard fallback as the old kernel
-            if (cached)
-                for (size_t p = 0; p < nptn; ++p)
-                    if (tape_nni_down.head[p].wildcard || tape_nni_up.head[p].wildcard) { cached = false; break; }
-        }
-
-        double score;
-        double optlen = orig_central_len;
-        if (cached) {
-            sciphy_nni_up = &upParent;
-            sciphy_nni_down = &downChild;
-            sciphy_nni_up_tape = &tape_nni_up;
-            sciphy_nni_down_tape = &tape_nni_down;
-            sciphy_nni_active = true;
-            double neg = 0.0, ferr = 0.0;
-            const double initial_neg = computeFunction(orig_central_len);
-            const double optx = minimizeOneDimen(params->min_branch_length, orig_central_len,
-                                                 params->max_branch_length, params->min_branch_length,
-                                                 &neg, &ferr);
-            sciphy_nni_active = false;
-            sciphy_nni_up = sciphy_nni_down = nullptr;
-            sciphy_nni_up_tape = sciphy_nni_down_tape = nullptr;
-            const bool keep_orig = (neg > initial_neg + 1e-8);
-            optlen = keep_orig ? orig_central_len : optx;
-            score  = -(keep_orig ? initial_neg : neg);
-
-            if (checking()) {
-                // old local partials at the same candidate, combined at both lengths
-                buildDownwardLocal(node2, node1, downChild);
-                buildUpToCLocal(node1, node2, downChild, upParent);
-                std::vector<double> new_ptn(nptn), old_ptn(nptn);
-                for (double len : {orig_central_len, optlen}) {
-                    combineTape(tape_nni_up, tape_nni_down, len, new_ptn.data());
-                    combineVectors(upParent, downChild, len, old_ptn.data());
-                    checkTapes("nni", new_ptn.data(), old_ptn.data());
-                }
-            }
-        } else {
-            central->length = central_back->length = orig_central_len;
-            score = computeLikelihood();
-        }
-
-        if (dbg_cache) {
-            central->length = central_back->length = optlen;
-            const double exact = computeLikelihood();
-            if (std::fabs(exact - score) > 1e-6)
-                std::cerr << std::setprecision(12)
-                          << "[nni cache check] n1=" << node1->id << " n2=" << node2->id
-                          << " cnt=" << cnt << " cached=" << score << " exact=" << exact
-                          << " diff=" << (exact - score) << (cached ? "" : " (fallback)") << "\n";
-            score = exact;
-        }
+        double optlen;
+        const double score = scoreNNICandidate(node1, node2, cnt, orig_central_len, optlen);
 
         central->length = central_back->length = orig_central_len;
         nniMoves[cnt].newloglh = score;
@@ -1678,6 +1703,20 @@ void setWildcard(SciPhyTapeHead &h, double log_scale) {
     h.log_scale = log_scale;
 }
 
+// Normalises every non-wildcard tape of out; tapes flagged in redo are handed to
+// redoTape(p, head, lh) instead, to be recomputed in log space.
+template <class RedoTape>
+void finishTapes(SciPhyTapePartials &out, const std::vector<size_t> &offset,
+                 const std::vector<char> &redo, RedoTape redoTape) {
+    for (size_t p = 0; p < out.head.size(); ++p) {
+        SciPhyTapeHead &h = out.head[p];
+        if (h.wildcard) continue;
+        double *lh = &out.lh[offset[p]];
+        if (redo[p]) redoTape((int)p, h, lh);
+        else h.log_scale += normalizeTape(lh, h.depth);
+    }
+}
+
 }  // anonymous namespace
 
 bool PhyloTreeSciPhy::hasPartial(PhyloNeighbor *nei) const {
@@ -1770,6 +1809,34 @@ SciPhyTapePartials &PhyloTreeSciPhy::tapePartials(PhyloNeighbor *nei) const {
     return *nei->sciphy_tape_partial;
 }
 
+// lh[i] *= sum_j T(i,j) child[j] over one child branch; a product that underflows
+// flags tape p for a log-space redo.
+void PhyloTreeSciPhy::multiplyChild(const BranchTable &bt, int p, const SciPhyTapeHead &c,
+                                    const double *child_lh, SciPhyTapeHead &h, double *lh) {
+    double v[MAX_TAPE_SITES + 1];
+    h.log_scale += transDown(bt, tape_len[p], prefixProd(c.rep), prefixZeros(c.rep),
+                             child_lh, c.depth, h.depth, v);
+    double mx = 0.0;
+    for (int i = 0; i <= h.depth; ++i) { lh[i] *= v[i]; mx = std::max(mx, lh[i]); }
+    if (mx < LH_UNDERFLOW) tape_redo[p] = 1;
+    else if (mx < RENORM_BELOW) h.log_scale += normalizeTape(lh, h.depth);
+}
+
+// Support = prefixes of the common prefix of the observed (non-wildcard) kids' tapes;
+// rep = -1 if every kid is a wildcard.
+template <class HeadOf>
+void PhyloTreeSciPhy::commonSupport(const std::vector<PhyloNeighbor*> &kids, HeadOf headOf,
+                                    int &rep, int &depth) const {
+    rep = -1;
+    depth = -1;
+    for (PhyloNeighbor *k : kids) {
+        const SciPhyTapeHead &c = headOf(k);
+        if (c.wildcard) continue;
+        if (rep < 0) { rep = c.rep; depth = c.depth; }
+        else depth = commonDepth(rep, c.rep, std::min(depth, (int)c.depth));
+    }
+}
+
 // Post-order: cache Down(subtree) on dad_branch->sciphy_tape_partial.
 void PhyloTreeSciPhy::computeTapeDownward(PhyloNeighbor *dad_branch, PhyloNode *dad) {
     if (dad_branch->partial_lh_computed & 1) {
@@ -1822,14 +1889,11 @@ void PhyloTreeSciPhy::combineTapeChildren(const std::vector<PhyloNeighbor*> &kid
     for (int p = 0; p < nptn; ++p) {
         SciPhyTapeHead &h = out.head[p];
         double scale = 0.0;
-        int rep = -1, depth = -1;
-        for (PhyloNeighbor *k : kids) {
-            const SciPhyTapeHead &c = k->sciphy_tape_partial->head[p];
-            scale += c.log_scale;
-            if (c.wildcard) continue;
-            if (rep < 0) { rep = c.rep; depth = c.depth; }
-            else depth = commonDepth(rep, c.rep, std::min(depth, (int)c.depth));
-        }
+        for (PhyloNeighbor *k : kids) scale += k->sciphy_tape_partial->head[p].log_scale;
+        int rep, depth;
+        commonSupport(kids, [&](PhyloNeighbor *k) -> const SciPhyTapeHead & {
+            return k->sciphy_tape_partial->head[p];
+        }, rep, depth);
         if (rep < 0) { setWildcard(h, scale); continue; }
         h.wildcard = false;
         h.rep = rep;
@@ -1850,29 +1914,15 @@ void PhyloTreeSciPhy::combineTapeChildren(const std::vector<PhyloNeighbor*> &kid
             SciPhyTapeHead &h = out.head[p];
             const SciPhyTapeHead &c = cp.head[p];
             if (h.wildcard || c.wildcard || tape_redo[p]) continue;
-            double v[MAX_TAPE_SITES + 1];
-            h.log_scale += transDown(bt, tape_len[p], prefixProd(c.rep), prefixZeros(c.rep),
-                                     &cp.lh[tape_lh_offset[p]], c.depth, h.depth, v);
-            double *lh = &out.lh[tape_lh_offset[p]];
-            double mx = 0.0;
-            for (int i = 0; i <= h.depth; ++i) { lh[i] *= v[i]; mx = std::max(mx, lh[i]); }
-            if (mx < LH_UNDERFLOW) tape_redo[p] = 1;
-            else if (mx < RENORM_BELOW) h.log_scale += normalizeTape(lh, h.depth);
+            multiplyChild(bt, p, c, &cp.lh[tape_lh_offset[p]], h, &out.lh[tape_lh_offset[p]]);
         }
     }
 
-    for (int p = 0; p < nptn; ++p) {
-        SciPhyTapeHead &h = out.head[p];
-        if (h.wildcard) continue;
-        double *lh = &out.lh[tape_lh_offset[p]];
-        if (!tape_redo[p]) {
-            h.log_scale += normalizeTape(lh, h.depth);
-            continue;
-        }
+    finishTapes(out, tape_lh_offset, tape_redo, [&](int p, SciPhyTapeHead &h, double *lh) {
         h.log_scale = 0.0;
         for (PhyloNeighbor *k : kids) h.log_scale += k->sciphy_tape_partial->head[p].log_scale;
         h.log_scale += tapeLogs(p, h.rep, h.depth, nullptr, 0, 0.0, kids, nullptr, lh);
-    }
+    });
 }
 
 double PhyloTreeSciPhy::tapeLogs(int p, int rep, int depth, const SciPhyTapePartials *up,
@@ -1995,30 +2045,16 @@ void PhyloTreeSciPhy::computeTapeUpward(PhyloNode *node, PhyloNode *dad) {
                 h.log_scale += d.log_scale;   // constant UpBar folds in all sibling constants
                 if (h.wildcard || d.wildcard || tape_redo[p]) continue;
                 const size_t off = tape_lh_offset[p];
-                double v[MAX_TAPE_SITES + 1];
-                h.log_scale += transDown(bt, tape_len[p], prefixProd(d.rep), prefixZeros(d.rep),
-                                         &dd.lh[off], d.depth, h.depth, v);
-                double *lh = &out.lh[off];
-                double mx = 0.0;
-                for (int i = 0; i <= h.depth; ++i) { lh[i] *= v[i]; mx = std::max(mx, lh[i]); }
-                if (mx < LH_UNDERFLOW) tape_redo[p] = 1;
-                else if (mx < RENORM_BELOW) h.log_scale += normalizeTape(lh, h.depth);
+                multiplyChild(bt, p, d, &dd.lh[off], h, &out.lh[off]);
             }
         }
-        for (int p = 0; p < nptn; ++p) {
-            SciPhyTapeHead &h = out.head[p];
-            if (h.wildcard) continue;
-            double *lh = &out.lh[tape_lh_offset[p]];
-            if (!tape_redo[p]) {
-                h.log_scale += normalizeTape(lh, h.depth);
-                continue;
-            }
+        finishTapes(out, tape_lh_offset, tape_redo, [&](int p, SciPhyTapeHead &h, double *lh) {
             h.log_scale = upToDad.head[p].log_scale;
             for (size_t di = 0; di < childDown.size(); ++di)
                 if (di != ci) h.log_scale += childDown[di]->sciphy_tape_partial->head[p].log_scale;
             h.log_scale += tapeLogs(p, h.rep, h.depth, &upToDad, upToDad.head[p].depth,
                                     down_nei->length, childDown, childDown[ci], lh);
-        }
+        });
         c_up->partial_lh_computed |= 1;
     }
     for (size_t ci = 0; ci < childNode.size(); ++ci)
@@ -2155,13 +2191,9 @@ void PhyloTreeSciPhy::buildTapeUpToCLocal(PhyloNode *parent, PhyloNode *child,
     for (int p = 0; p < nptn; ++p) {
         SciPhyTapeHead &h = out.head[p];
         const SciPhyTapeHead &uP = upP.head[p];
-        int rep = -1, depth = -1;
-        for (PhyloNeighbor *k : kids) {
-            const SciPhyTapeHead &c = kidHead(k, p);
-            if (c.wildcard) continue;
-            if (rep < 0) { rep = c.rep; depth = c.depth; }
-            else depth = commonDepth(rep, c.rep, std::min(depth, (int)c.depth));
-        }
+        int rep, depth;
+        commonSupport(kids, [&](PhyloNeighbor *k) -> const SciPhyTapeHead & { return kidHead(k, p); },
+                      rep, depth);
         if (uP.wildcard || rep < 0) {
             double ls = totalTapeMass(uP, &upP.lh[tape_lh_offset[p]]);
             for (PhyloNeighbor *k : kids) {
@@ -2206,30 +2238,16 @@ void PhyloTreeSciPhy::buildTapeUpToCLocal(PhyloNode *parent, PhyloNode *child,
             h.log_scale += d.log_scale;
             if (d.wildcard || tape_redo[p]) continue;
             const size_t off = tape_lh_offset[p];
-            double v[MAX_TAPE_SITES + 1];
-            h.log_scale += transDown(bt, tape_len[p], prefixProd(d.rep), prefixZeros(d.rep),
-                                     &dd.lh[off], d.depth, h.depth, v);
-            double *lh = &out.lh[off];
-            double mx = 0.0;
-            for (int i = 0; i <= h.depth; ++i) { lh[i] *= v[i]; mx = std::max(mx, lh[i]); }
-            if (mx < LH_UNDERFLOW) tape_redo[p] = 1;
-            else if (mx < RENORM_BELOW) h.log_scale += normalizeTape(lh, h.depth);
+            multiplyChild(bt, p, d, &dd.lh[off], h, &out.lh[off]);
         }
     }
-    for (int p = 0; p < nptn; ++p) {
-        SciPhyTapeHead &h = out.head[p];
-        if (h.wildcard) continue;
-        double *lh = &out.lh[tape_lh_offset[p]];
-        if (!tape_redo[p]) {
-            h.log_scale += normalizeTape(lh, h.depth);
-            continue;
-        }
+    finishTapes(out, tape_lh_offset, tape_redo, [&](int p, SciPhyTapeHead &h, double *lh) {
         h.log_scale = upP.head[p].log_scale;
         for (PhyloNeighbor *k : kids)
             if (k != child_nei) h.log_scale += k->sciphy_tape_partial->head[p].log_scale;
         h.log_scale += tapeLogs(p, h.rep, h.depth, &upP, upP.head[p].depth, pnei->length,
                                 kids, child_nei, lh);
-    }
+    });
 }
 
 // <----- Check mode (IQTREE_SCIPHY_KERNEL=check) ----->
